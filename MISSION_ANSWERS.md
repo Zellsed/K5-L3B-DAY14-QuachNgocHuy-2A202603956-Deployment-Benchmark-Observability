@@ -610,9 +610,62 @@ Xong thì `docker compose -p k5-day14-scaling down` để trả cổng 8080.
 <!-- Trong 06-lab-complete/: python check_production_ready.py (bản đầy đủ, có Docker) → PASS 12/12.
      Dán phần "📋 Checklist Deliverable" của output. -->
 
+Chạy trong WSL2 (`os.name == "posix"`), Docker 29.9.3, bản đầy đủ (không `--static-only` / `--skip-docker`):
+
 ```text
-[dán output check_production_ready.py]
+$ cd 06-lab-complete && python check_production_ready.py
+...
+✅ 1. Dockerfile (multi-stage, < 500 MB)
+     ✅ Docker: build image thành công — 12s
+     ✅ Docker: image < 500 MB — 273 MB
+     ✅ Docker: container chạy được, GET /health → 200
+✅ 5. Readiness endpoint (GET /ready)
+     ✅ Khi chạy: Redis mất kết nối → /ready 503 (còn /health vẫn 200)
+✅ 7. Rate limiting
+     ✅ Khi chạy: vượt giới hạn → 429 — 429 sau 5 request thành công (RATE_LIMIT_PER_MINUTE=5)
+     ✅ Khi chạy: state nằm trong Redis — restart agent vẫn bị 429
+✅ 8. Cost guard
+     ✅ Khi chạy: hết budget → 402 — 402 ở request thứ 1
+✅ 10. Structured logging
+     ✅ Khi chạy: mọi dòng log của app là JSON hợp lệ — 17 dòng JSON
+✅ 11. Graceful shutdown
+     ✅ Khi chạy: SIGTERM lúc đang có request → request vẫn 200, process tự thoát — exit code 0
+     ✅ Docker: `docker stop` tắt êm (exit code 0, < 10s) — exit code 0, 1.1s
+...
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 43/43 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
 ```
+
+### Thiết kế chính
+
+| Thành phần | Cách làm | File |
+|---|---|---|
+| Config | Mọi giá trị đọc từ env (`PORT`, `ENVIRONMENT`, `AGENT_API_KEY`, `REDIS_URL`, `RATE_LIMIT_PER_MINUTE`, `DAILY_BUDGET_USD`, `MONTHLY_BUDGET_USD`); không có API key mặc định → chưa đặt key thì `/ask` từ chối tất cả (fail closed) | `app/config.py` |
+| Auth | `APIKeyHeader("X-API-Key", auto_error=False)`, so sánh bằng `secrets.compare_digest`; thiếu/sai → 401 | `app/auth.py` |
+| Redis | `redis.from_url` không kết nối lúc import → app khởi động được khi chưa có Redis; timeout 2 giây | `app/redis_client.py` |
+| Rate limit | Sliding window 60 giây bằng ZSET `ratelimit:<sha256(key)>`: `ZREMRANGEBYSCORE` → `ZADD` → `ZCARD` → `EXPIRE` trong một MULTI/EXEC; vượt thì xoá request vừa ghi, trả 429 + `Retry-After` | `app/rate_limiter.py` |
+| Cost guard | `INCRBYFLOAT` vào `cost:daily:YYYY-MM-DD` và `cost:monthly:YYYY-MM` (UTC, tự hết hạn); kiểm tra **trước** khi gọi LLM, vượt → 402 | `app/cost_guard.py` |
+| `/health` vs `/ready` | `/health` luôn 200 khi process sống (không đụng Redis, tránh bị platform restart oan); `/ready` ping Redis, mất Redis hoặc đang tắt → 503 | `app/main.py` |
+| Log | Logger `agent` riêng với `JsonFormatter`: mỗi dòng 1 JSON (`ts`, `lvl`, `event`, ...); middleware ghi `method`, `path`, `status`, `ms` cho mỗi request; traceback nằm trong field `exc` | `app/main.py` |
+| Xử lý lỗi | Input sai → 422 của Pydantic; lỗi Redis → 503 `Retry-After`; lỗi khác → 500 `Internal server error`; không trả stack trace cho client | `app/main.py` |
+| Graceful shutdown | Không tự đăng ký handler SIGTERM; uvicorn ngừng nhận kết nối mới, chờ request đang chạy, rồi chạy phần shutdown của `lifespan` (đặt `shutting_down`, đóng Redis) | `app/main.py` |
+| Docker | Multi-stage (builder tạo `/opt/venv`, runtime `python:3.11-slim` chỉ copy venv + `app/` + `utils/`), user `app`, `HEALTHCHECK`, `CMD sh -c "exec uvicorn ... --port ${PORT:-8000} --workers 2"` để uvicorn là PID 1 | `Dockerfile` |
 
 ---
 
@@ -627,4 +680,5 @@ Xong thì `docker compose -p k5-day14-scaling down` để trả cổng 8080.
 | 3 | Claude Code | Trả lời câu hỏi Exercise 2.1, 2.3, 2.4 từ các Dockerfile, `docker-compose.yml`, `nginx.conf` | Câu trả lời 2.1, giải thích multi-stage, bảng service và sơ đồ stack | Tự đối chiếu số dòng; số MB và output curl/compose là của mình chạy rồi dán |
 | 4 | Claude Code | Giải thích Part 4 (API key, JWT flow, rate limiter, cost guard) từ `04-api-gateway/` | Câu trả lời 4.1–4.4 và hàm `check_budget` dùng Redis | Output curl 401/403/200/429 là của mình chạy; tự đọc lại `auth.py`, `rate_limiter.py`, `cost_guard.py` để đối chiếu; đã che token |
 | 5 | Claude Code | Giải thích Part 5 (liveness/readiness, graceful shutdown, stateless, load balancing) và lỗi 502 lúc chạy vòng lặp 5.4 | Câu trả lời 5.1–5.5; nguyên nhân 502 là agent chưa sẵn sàng | Output là của mình chạy; chạy lại vòng lặp 5.4 sau khi 3 agent healthy để kiểm chứng |
-| 6 | | | | |
+| 6 | Claude Code | Hoàn thành các TODO Part 6 trong `06-lab-complete/` theo bảng tiêu chí của README và `check_production_ready.py` | Code `app/` (config, auth, Redis, rate limit sliding window bằng ZSET, cost guard theo ngày/tháng, log JSON, lifespan), Dockerfile multi-stage, compose, `.dockerignore`, `.env.example`, `railway.toml`, `render.yaml` | Tự chạy `python check_production_ready.py` bản đầy đủ trong WSL có Docker → PASS 12/12; đọc lại từng file để giải thích được với Lab Coach |
+| 7 | | | | |
