@@ -218,39 +218,56 @@ X-XSS-Protection: 1; mode=block
 
 ### Exercise 3.1 / 3.2: Deploy nền tảng chính
 
-- **Nền tảng:** Railway / Render
-- **URL public:** https://...
-- **Redis trên cloud:** (cách tạo, `REDIS_URL` đặt ở đâu)
+- **Nền tảng:** Railway (Exercise 3.1), deploy agent Part 6 trong `06-lab-complete/` bằng `railway up` (build theo `Dockerfile` + `railway.toml`).
+- **URL public:** https://day14-agent-production-57725e43.up.railway.app
+- **Redis trên cloud:** `railway add --database redis` tạo service Redis (`redis:8.2`, có volume) trong cùng project. Service agent đặt biến `REDIS_URL=${{Redis.REDIS_URL}}` (reference variable) nên Railway tự trỏ tới địa chỉ private của Redis; `/ready` trả 200 xác nhận agent kết nối được.
+- **Biến môi trường trên Railway:** `AGENT_API_KEY` (sinh ngẫu nhiên, không ghi vào repo), `REDIS_URL`, `ENVIRONMENT=production`, `RATE_LIMIT_PER_MINUTE=10`, `DAILY_BUDGET_USD=1.0`, `MONTHLY_BUDGET_USD=10.0`; `PORT` do Railway cấp. Chi tiết: [DEPLOYMENT.md](DEPLOYMENT.md).
 - **Ảnh:** [dashboard](screenshots/dashboard.png) · [running](screenshots/running.png) · [test](screenshots/test.png)
 
 **4 lệnh tự kiểm (CP6):**
 
 ```text
-/health  -> 
-/ready   -> 
-/ask (không key) -> 
-/ask (có key)    -> 
+PS> $base = "https://day14-agent-production-57725e43.up.railway.app"
+PS> curl.exe -sS -o NUL -w "%{http_code}`n" "$base/health"
+200
+PS> curl.exe -sS -o NUL -w "%{http_code}`n" "$base/ready"
+200
+PS> curl.exe -sS -o NUL -w "%{http_code}`n" -X POST "$base/ask" -H "Content-Type: application/json" -d '{\"question\":\"Hello\"}'
+401
+PS> curl.exe -sS -o NUL -w "%{http_code}`n" -X POST "$base/ask" -H "Content-Type: application/json" -H "X-API-Key: $key" -d '{\"question\":\"Hello\"}'
+200
 ```
+
+**Sự cố khi deploy:** sau `railway add --database redis`, CLI tự link vào service Redis nên lần `railway up` đầu tiên đẩy code agent vào **service Redis**. Đã gỡ deployment đó (Redis vẫn chạy image `redis:8.2`), tạo service riêng `railway add --service day14-agent`, `railway service day14-agent`, kiểm tra `railway status` thấy đúng service rồi mới `railway up` lại. Bài học: luôn kiểm tra service đang link trước khi deploy.
 
 ### Nền tảng còn lại: so sánh `railway.toml` với `render.yaml`
 
+So sánh bản mình viết cho agent Part 6 (`06-lab-complete/railway.toml`, `06-lab-complete/render.yaml`), có đối chiếu bản mẫu trong `03-cloud-deployment/`:
+
 | Khía cạnh | `railway.toml` | `render.yaml` | Ghi chú |
 |---|---|---|---|
-| Cách build | | | |
-| Lệnh start | | | |
-| Health check | | | |
-| Biến môi trường / secret | | | |
-| Redis / service phụ | | | |
+| Định dạng / phạm vi | TOML, cấu hình **một service** (service đang link) | YAML Blueprint, mô tả **cả hạ tầng**: nhiều service trong một file | Railway tạo service/database bằng CLI hoặc dashboard; Render tạo tất cả từ file |
+| Cách build | `builder = "DOCKERFILE"`, `dockerfilePath = "Dockerfile"` | `runtime: docker`, `rootDir: 06-lab-complete`, `dockerfilePath`, `dockerContext` | Bản mẫu 03 dùng `NIXPACKS` / `runtime: python` + `buildCommand: pip install ...`, không cần Dockerfile |
+| Lệnh start | Không khai báo: dùng `CMD` trong Dockerfile (`${PORT:-8000}`) | Không khai báo: dùng `CMD` trong Dockerfile | Bản mẫu 03 khai `startCommand = "uvicorn app:app --port $PORT"` vì không có Dockerfile |
+| Port | Railway inject `PORT` | Render inject `PORT` | Cả hai đều cần app lắng nghe theo `PORT` |
+| Health check | `healthcheckPath = "/health"`, `healthcheckTimeout = 100` | `healthCheckPath: /health` | Railway: health check lúc deploy để quyết định có chuyển traffic sang bản mới không |
+| Restart | `restartPolicyType = "ON_FAILURE"`, tối đa 3 lần | Render tự restart, không cấu hình trong file | |
+| Biến môi trường / secret | **Không có trong file**: đặt bằng `railway variables --set` hoặc dashboard | Khai trong `envVars`; secret dùng `sync: false` (nhập tay trên dashboard) hoặc `generateValue: true` (Render tự sinh) | Cả hai đều không ghi giá trị secret vào repo |
+| Redis / service phụ | Không khai trong file; `railway add --database redis`, nối bằng `REDIS_URL=${{Redis.REDIS_URL}}` | Khai luôn service `type: keyvalue` và nối bằng `fromService: {type: keyvalue, property: connectionString}` | Bản mẫu 03 dùng `type: redis` (tên cũ) |
+| Cách deploy | `railway up` đẩy thư mục local lên, không cần GitHub | Push lên GitHub → New → Blueprint; `autoDeploy` khi push | |
+| Gói miễn phí | Trial có credit ($5 / 30 ngày lúc mình đăng ký) | Free plan, service ngủ sau ~15 phút không có request (cold start) | |
 
-**Vì sao khác nhau:**
+**Vì sao khác nhau:** Railway coi file config là phần **build/deploy của từng service**, còn hạ tầng (service, database, biến) quản lý bằng CLI/dashboard. Vì vậy `railway.toml` ngắn và không nói gì về Redis hay secret. Render theo hướng **Infrastructure as Code**: một Blueprint mô tả đủ web service, Redis, biến môi trường và cách nối chúng với nhau, nên dựng lại toàn bộ môi trường chỉ từ repo, đổi lại file dài hơn và phải có GitHub. (Railway cũng đang chuyển sang Infrastructure as Code: CLI cảnh báo Config as Code `railway.toml` sẽ được thay bằng `.railway/railway.ts`.)
 
 ### Exercise 3.3: Pipeline CI/CD Cloud Run
 
-<!-- Đọc 03-cloud-deployment/production-cloud-run/cloudbuild.yaml và service.yaml, viết 3–5 dòng. -->
+Đọc `03-cloud-deployment/production-cloud-run/cloudbuild.yaml` và `service.yaml`:
 
-1.
-2.
-3.
+1. **Trigger:** push lên nhánh `main` kích hoạt Cloud Build chạy `cloudbuild.yaml` (hoặc chạy tay `gcloud builds submit`), timeout 20 phút.
+2. **Test:** bước `test` chạy trong `python:3.11-slim`: `pip install` + `pytest tests/`; test fail thì pipeline dừng, không build. (Thư mục `tests/` chưa có trong repo nên bước này sẽ fail nếu chạy thật.)
+3. **Build & push:** `docker build` (dùng `--cache-from ...:latest` để tận dụng layer cache) gắn 2 tag `:$COMMIT_SHA` và `:latest`, rồi `docker push --all-tags` lên Container Registry `gcr.io/$PROJECT_ID/ai-agent`.
+4. **Deploy:** `gcloud run deploy ai-agent --image ...:$COMMIT_SHA` (tag theo commit để biết chính xác bản nào đang chạy và rollback được) ở `asia-southeast1`, 512Mi / 1 CPU, `min-instances=1` để tránh cold start, `max-instances=10`; `ENVIRONMENT` qua `--set-env-vars`, `OPENAI_API_KEY` lấy từ **Secret Manager** qua `--set-secrets`.
+5. **`service.yaml`** là cách khai báo cùng service đó theo kiểu Infrastructure as Code (Knative, `gcloud run services replace`): autoscale 1–10 instance, mỗi instance tối đa 80 request đồng thời, timeout 60 giây, `livenessProbe` gọi `/health` mỗi 30 giây, `startupProbe` gọi `/ready` trước khi nhận traffic, secret (`OPENAI_API_KEY`, `AGENT_API_KEY`) lấy từ Secret Manager qua `secretKeyRef`.
 
 ---
 
@@ -681,4 +698,5 @@ $ cd 06-lab-complete && python check_production_ready.py
 | 4 | Claude Code | Giải thích Part 4 (API key, JWT flow, rate limiter, cost guard) từ `04-api-gateway/` | Câu trả lời 4.1–4.4 và hàm `check_budget` dùng Redis | Output curl 401/403/200/429 là của mình chạy; tự đọc lại `auth.py`, `rate_limiter.py`, `cost_guard.py` để đối chiếu; đã che token |
 | 5 | Claude Code | Giải thích Part 5 (liveness/readiness, graceful shutdown, stateless, load balancing) và lỗi 502 lúc chạy vòng lặp 5.4 | Câu trả lời 5.1–5.5; nguyên nhân 502 là agent chưa sẵn sàng | Output là của mình chạy; chạy lại vòng lặp 5.4 sau khi 3 agent healthy để kiểm chứng |
 | 6 | Claude Code | Hoàn thành các TODO Part 6 trong `06-lab-complete/` theo bảng tiêu chí của README và `check_production_ready.py` | Code `app/` (config, auth, Redis, rate limit sliding window bằng ZSET, cost guard theo ngày/tháng, log JSON, lifespan), Dockerfile multi-stage, compose, `.dockerignore`, `.env.example`, `railway.toml`, `render.yaml` | Tự chạy `python check_production_ready.py` bản đầy đủ trong WSL có Docker → PASS 12/12; đọc lại từng file để giải thích được với Lab Coach |
-| 7 | | | | |
+| 7 | Claude Code | Hướng dẫn deploy agent Part 6 lên Railway, xử lý lỗi `railway up` đẩy nhầm vào service Redis; viết `DEPLOYMENT.md`, so sánh `railway.toml`/`render.yaml`, tóm tắt pipeline Cloud Run | Các lệnh Railway CLI, cách đặt `REDIS_URL=${{Redis.REDIS_URL}}`, nội dung Part 3 | Tự chạy lệnh deploy và 4 lệnh tự kiểm (200/200/401/200); tự kiểm tra trên dashboard Redis vẫn chạy image gốc; tự đọc lại `cloudbuild.yaml`, `service.yaml` |
+| 8 | | | | |
